@@ -1,0 +1,240 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>BetterSafe — Receiver</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+  <style>
+    body{ font-family: Arial, sans-serif; margin:0; }
+    header{ background:#0288d1; color:#fff; padding:12px; text-align:center; font-weight:700;}
+    .controls{ padding:10px; display:flex; gap:8px; align-items:center; justify-content:center; }
+    input{ padding:8px; border-radius:6px; border:1px solid #ddd; }
+    button{ padding:10px 14px; border-radius:8px; border:none; cursor:pointer; font-weight:700; }
+    #map{ height:70vh; }
+    #status{ padding:8px; text-align:center; }
+  </style>
+</head>
+<body>
+  <header>BetterSafe — Receiver</header>
+  <div class="controls">
+    <label>Sender ID to Track:</label>
+    <select id="userIdSelect"></select>
+    <button id="trackBtn" style="background:#03a9f4;color:white;">🛰️ Track</button>
+    <button id="viewHistoryBtn" style="background:#ff9800;color:white;">📜 View History</button>
+  </div>
+  <div id="status">Status: idle</div>
+  <div id="map"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    const socket = io();
+    const trackBtn = document.getElementById('trackBtn');
+    const viewHistoryBtn = document.getElementById('viewHistoryBtn');
+    const userIdSelect = document.getElementById('userIdSelect');
+    const statusEl = document.getElementById('status');
+
+    let map = L.map('map').setView([20.5937, 78.9629], 5);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+    let marker = null, circle = null, polyline = null;
+    let currentTrackingId = null;
+
+    async function loadContacts() {
+        try {
+            const res = await fetch('/contacts');
+            const contacts = await res.json();
+            userIdSelect.innerHTML = '';
+            for (const userId in contacts) {
+                const option = document.createElement('option');
+                option.value = userId;
+                option.textContent = `${contacts[userId].name} (${contacts[userId].phone})`;
+                userIdSelect.appendChild(option);
+            }
+        } catch (err) {
+            console.error('Failed to load contacts', err);
+        }
+    }
+
+    function getUserId() {
+        return userIdSelect.value;
+    }
+
+    function setStatus(t) { statusEl.innerText = 'Status: ' + t; }
+
+    function clearMap() {
+      if (polyline) { polyline.remove(); polyline = null; }
+      if (marker) { marker.remove(); marker = null; }
+      if (circle) { circle.remove(); circle = null; }
+    }
+
+    function drawHistory(history) {
+      clearMap();
+      if (!history || history.length === 0) {
+        setStatus(`No history for ${currentTrackingId}. Waiting for live updates.`);
+        return;
+      }
+
+      const latlngs = history.map(p => [p.lat, p.lng]);
+      polyline = L.polyline(latlngs, { color: 'red' }).addTo(map);
+      map.fitBounds(polyline.getBounds());
+
+      const lastPoint = history[history.length - 1];
+      updateMarker(lastPoint, false);
+      setStatus(`Tracking ${currentTrackingId}. Last update: ${new Date(lastPoint.ts).toLocaleString()}`);
+    }
+
+    function updateMarker(data, isLive = true) {
+        const { lat, lng, acc, ts, note } = data;
+        if (note === 'stopped' || lat === null || lng === null) {
+            setStatus(`Sender ${currentTrackingId} has stopped tracking.`);
+            return;
+        }
+
+        const accuracyInMeters = Math.round(acc);
+        const accuracyText = `(±${accuracyInMeters}m)`;
+
+        if (!marker) {
+            marker = L.marker([lat, lng]).addTo(map);
+            marker.bindTooltip(accuracyText, { permanent: true, direction: 'top', offset: [0, -20] }).openTooltip();
+        } else {
+            marker.setLatLng([lat, lng]);
+            marker.setTooltipContent(accuracyText);
+        }
+
+        if (!circle) circle = L.circle([lat, lng], { radius: acc, color: '#03a9f4', weight: 2, fillOpacity: 0.2 }).addTo(map);
+        else { circle.setLatLng([lat, lng]); circle.setRadius(acc); }
+
+        if (isLive && polyline) {
+            polyline.addLatLng([lat, lng]);
+        }
+        
+        if (!isLive || map.getZoom() < 15) {
+            map.fitBounds(circle.getBounds());
+        }
+        
+        setStatus(`Tracking ${currentTrackingId}. Last update: ${new Date(ts).toLocaleString()} (Accuracy: ${accuracyInMeters}m)`);
+    }
+
+    trackBtn.onclick = async () => {
+      const userId = getUserId();
+      if (!userId) { alert('Please select a contact to track.'); return; }
+      if (currentTrackingId === userId) return;
+
+      currentTrackingId = userId;
+      setStatus(`Fetching history for ${userId}...`);
+      
+      socket.emit('join_room', userId);
+
+      try {
+        const res = await fetch(`/history/${encodeURIComponent(userId)}`);
+        const history = await res.json();
+        drawHistory(history);
+      } catch (err) {
+        console.error('Failed to fetch history:', err);
+        setStatus(`Error fetching history for ${userId}.`);
+      }
+    };
+
+    viewHistoryBtn.onclick = async () => {
+      const userId = getUserId();
+      if (!userId) { alert('Please select a contact to view history.'); return; }
+      if (currentTrackingId) {
+        socket.off('location_update');
+        socket.off('history_cleared');
+        currentTrackingId = null;
+      }
+      
+      setStatus(`Fetching history for ${userId}...`);
+      try {
+        const res = await fetch(`/history/${encodeURIComponent(userId)}`);
+        const history = await res.json();
+        drawHistoryPathOnly(history, userId);
+      } catch (err) {
+        console.error('Failed to fetch history:', err);
+        setStatus('Error fetching history.');
+      }
+    };
+
+    function drawHistoryPathOnly(history, userId) {
+      clearMap();
+      if (!history || history.length === 0) {
+        setStatus(`No history found for ${userId}.`);
+        return;
+      }
+
+      const latlngs = history.map(p => [p.lat, p.lng]);
+      polyline = L.polyline(latlngs, { color: 'purple' }).addTo(map);
+      map.fitBounds(polyline.getBounds());
+
+      const lastPoint = history[history.length - 1];
+      marker = L.marker([lastPoint.lat, lastPoint.lng]).addTo(map);
+      
+      setStatus(`Displaying history for ${userId}. Last point from: ${new Date(lastPoint.ts).toLocaleString()}`);
+    }
+
+    socket.on('location_update', (data) => {
+      if (data.userId === currentTrackingId) {
+        updateMarker(data);
+      }
+    });
+
+    socket.on('history_cleared', () => {
+        if (currentTrackingId) {
+            clearMap();
+            setStatus(`History for ${currentTrackingId} was cleared by the sender.`);
+        }
+    });
+
+    // New listener for incoming emergency alerts
+    socket.on('emergency_started', ({ userId, contactName }) => {
+        // Don't interrupt if we are already tracking this person
+        if (currentTrackingId === userId) {
+            // Optional: Add a visual cue, like flashing the header
+            const header = document.querySelector('header');
+            header.style.backgroundColor = '#f44336'; // Change to emergency red
+            setTimeout(() => { header.style.backgroundColor = '#0288d1'; }, 3000); // Revert after 3s
+            return;
+        }
+
+        if (confirm(`🚨 EMERGENCY! 🚨\n\n${contactName} has started an emergency broadcast.\n\nDo you want to track them now?`)) {
+            // Find the contact in the dropdown and select it
+            const optionExists = Array.from(userIdSelect.options).some(opt => opt.value === userId);
+            if (optionExists) {
+                userIdSelect.value = userId;
+                // Automatically click the "Track" button
+                trackBtn.click();
+            } else {
+                alert(`Could not find contact ${contactName} in the list.`);
+            }
+        }
+    });
+
+    // Listen for auto-refresh event from server
+    socket.on('contacts_updated', loadContacts);
+
+    function handleDirectTrackLink() {
+        const urlParams = new URLSearchParams(window.location.search);
+        const trackId = urlParams.get('track');
+        if (trackId) {
+            // Check if this contact exists in the dropdown
+            const optionExists = Array.from(userIdSelect.options).some(opt => opt.value === trackId);
+            if (optionExists) {
+                userIdSelect.value = trackId;
+                // Automatically start tracking
+                trackBtn.click();
+            } else {
+                setStatus(`Contact ID from link not found: ${trackId}`);
+            }
+        }
+    }
+
+    // Initial load
+    loadContacts().then(() => {
+        // After contacts are loaded, check for a direct tracking link
+        handleDirectTrackLink();
+    });
+  </script>
+</body>
+</html>

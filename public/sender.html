@@ -1,0 +1,299 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>BetterSafe — Sender</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+  <style>
+    body{ font-family: Arial, sans-serif; margin:0; }
+    header{ background:#d32f2f; color:#fff; padding:12px; text-align:center; font-weight:700;}
+    .controls{ padding:10px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:center; border-bottom: 1px solid #eee; }
+    .contact-form{ padding:10px; display:flex; gap:8px; align-items:center; justify-content:center; background: #f5f5f5; }
+    input, select { padding:8px; border-radius:6px; border:1px solid #ddd; }
+    button{ padding:10px 14px; border-radius:8px; border:none; cursor:pointer; font-weight:700; }
+    #map{ height:45vh; }
+    #status{ padding:8px; text-align:center; }
+    #contactList { list-style: none; padding: 10px; margin: 0; max-height: 15vh; overflow-y: auto; background: #fafafa; }
+    #contactList li { padding: 8px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
+    #contactList li.selected { background-color: #dcedff; }
+    #contactList .contact-actions button { font-size: 0.8em; padding: 4px 8px; }
+  </style>
+</head>
+<body>
+  <header>BetterSafe — Sender</header>
+
+  <div class="contact-form">
+    <input id="contactName" placeholder="New Contact Name" />
+    <input id="contactPhone" placeholder="Phone Number" />
+    <button id="addContactBtn" style="background:#4caf50;color:white;">+ Add Contact</button>
+    <input type="hidden" id="editContactId">
+  </div>
+
+  <ul id="contactList"></ul>
+
+  <div class="controls">
+    <button id="start" style="background:#e53935;color:white;">🚨 Emergency (Start)</button>
+    <button id="stop" style="background:#6c757d;color:white;" disabled>⏹ Stop</button>
+    <button id="viewHistory" style="background:#ff9800;color:white;">📜 View History</button>
+    <button id="clear" style="background:#f44336;color:white;">🗑️ Clear History</button>
+    <button id="shareLink" style="background:#00bcd4;color:white;">🔗 Share Link</button>
+  </div>
+  <div id="status">Status: idle</div>
+  <div id="map"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    const socket = io();
+    const startBtn = document.getElementById('start');
+    const stopBtn = document.getElementById('stop');
+    const clearBtn = document.getElementById('clear');
+    const viewHistoryBtn = document.getElementById('viewHistory');
+    const shareLinkBtn = document.getElementById('shareLink');
+    const statusEl = document.getElementById('status');
+    const addContactBtn = document.getElementById('addContactBtn');
+    const contactNameEl = document.getElementById('contactName');
+    const contactPhoneEl = document.getElementById('contactPhone');
+    const contactListEl = document.getElementById('contactList');
+    const editContactIdEl = document.getElementById('editContactId');
+
+    let map = L.map('map').setView([0,0],2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+    let marker=null, circle=null, polyline=null, watchId=null;
+    let currentContacts = {};
+    let selectedUserId = null;
+
+    async function loadContacts() {
+        try {
+            const res = await fetch('/contacts');
+            currentContacts = await res.json();
+            contactListEl.innerHTML = '';
+            Object.entries(currentContacts).forEach(([userId, contact]) => {
+                const li = document.createElement('li');
+                li.dataset.userId = userId;
+                li.innerHTML = `
+                    <span>${contact.name} (${contact.phone})</span>
+                    <span class="contact-actions">
+                        <button class="edit-btn" style="background:#ffc107">Edit</button>
+                        <button class="delete-btn" style="background:#dc3545;color:white">Del</button>
+                    </span>
+                `;
+                contactListEl.appendChild(li);
+                if (userId === selectedUserId) {
+                    li.classList.add('selected');
+                }
+            });
+        } catch (err) { console.error('Failed to load contacts', err); }
+    }
+
+    contactListEl.onclick = (e) => {
+        const li = e.target.closest('li');
+        if (!li) return;
+        const userId = li.dataset.userId;
+
+        if (e.target.classList.contains('edit-btn')) {
+            const contact = currentContacts[userId];
+            contactNameEl.value = contact.name;
+            contactPhoneEl.value = contact.phone;
+            editContactIdEl.value = userId;
+            addContactBtn.textContent = 'Save Changes';
+            addContactBtn.style.background = '#2196f3';
+        } else if (e.target.classList.contains('delete-btn')) {
+            if (confirm(`Are you sure you want to delete ${currentContacts[userId].name}? This will also delete all their location history.`)) {
+                fetch(`/contacts/${userId}`, { method: 'DELETE' });
+            }
+        } else {
+            document.querySelectorAll('#contactList li').forEach(el => el.classList.remove('selected'));
+            li.classList.add('selected');
+            selectedUserId = userId;
+        }
+    };
+
+    addContactBtn.onclick = async () => {
+        const name = contactNameEl.value.trim();
+        const phone = contactPhoneEl.value.trim();
+        const editingId = editContactIdEl.value;
+        if (!name || !phone) return alert('Please enter both name and phone number.');
+
+        const url = editingId ? `/contacts/${editingId}` : '/contacts';
+        const method = editingId ? 'PUT' : 'POST';
+
+        await fetch(url, {
+            method: method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, phone })
+        });
+
+        contactNameEl.value = '';
+        contactPhoneEl.value = '';
+        editContactIdEl.value = '';
+        addContactBtn.textContent = '+ Add Contact';
+        addContactBtn.style.background = '#4caf50';
+    };
+
+    shareLinkBtn.onclick = () => {
+        const userId = getUserId();
+        if (!userId) {
+            alert('Please select a contact to share.');
+            return;
+        }
+        // Always generate a localhost link
+        const trackingLink = `http://localhost:3000/receiver.html?track=${userId}`;
+        navigator.clipboard.writeText(trackingLink).then(() => {
+            setStatus(`Tracking link for ${currentContacts[userId].name} copied to clipboard!`);
+        }).catch(err => {
+            console.error('Failed to copy link: ', err);
+            setStatus('Could not copy link to clipboard.');
+        });
+    };
+
+    function getUserId() { return selectedUserId; }
+    function setStatus(t){ statusEl.innerText = 'Status: ' + t; }
+    function clearMap() {
+      if (polyline) { polyline.remove(); polyline=null; }
+      if (marker) { marker.remove(); marker=null; }
+      if (circle) { circle.remove(); circle=null; }
+    }
+
+    startBtn.onclick = async () => {
+      const userId = getUserId();
+      if (!userId) { alert('Please add and select a contact first.'); return; }
+
+      // Confirmation prompt before sending a real alert
+      const contactName = currentContacts[userId].name;
+      if (!confirm(`This will send a REAL SMS alert to ${contactName}. Are you sure you want to start emergency tracking?`)) {
+          return;
+      }
+
+      // Emit the event to the server to send the SMS
+      socket.emit('send_emergency_alert', { userId, contactName });
+
+      socket.emit('join_room', userId);
+      setStatus('Requesting precise location...');
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+
+      try {
+        const pos = await new Promise((res, rej) => navigator.geolocation.getCurrentPosition(res, rej, { enableHighAccuracy: true, timeout: 20000 }));
+        applyPos(pos, userId);
+        setStatus('Emergency tracking started — sending updates');
+      } catch(e) {
+        console.warn('Initial fix failed', e.message);
+        setStatus(`Error: Could not get initial location. ${e.message}`);
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        return;
+      }
+
+      watchId = navigator.geolocation.watchPosition(
+        pos => applyPos(pos, userId),
+        err => setStatus('Geolocation error: ' + (err.message || err.code)),
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }
+      );
+    };
+
+    function applyPos(pos, userId) {
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
+      const acc = pos.coords.accuracy;
+      const ts = new Date().toISOString();
+
+      if (!marker) marker = L.marker([lat,lng]).addTo(map);
+      else marker.setLatLng([lat,lng]);
+
+      if (!circle) circle = L.circle([lat,lng], { radius: acc, color: 'blue', fillOpacity: 0.12 }).addTo(map);
+      else { circle.setLatLng([lat,lng]); circle.setRadius(acc); }
+
+      if (!polyline) polyline = L.polyline([[lat,lng]], { color: 'red' }).addTo(map);
+      else polyline.addLatLng([lat,lng]);
+
+      map.setView([lat,lng], 16);
+      setStatus(`Sending: ${lat.toFixed(5)}, ${lng.toFixed(5)} (±${Math.round(acc)} m)`);
+
+      socket.emit('location_update', { userId, lat, lng, acc, ts });
+
+      fetch('/location', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ userId, lat, lng, acc, ts })
+      }).catch(err => console.error('Failed to send location via fetch:', err));
+    }
+
+    stopBtn.onclick = () => {
+      if (watchId) navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+      setStatus('Tracking stopped');
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      const userId = getUserId();
+      if (!userId) return;
+      socket.emit('location_update', { userId, lat: null, lng: null, acc: null, ts: new Date().toISOString(), note: 'stopped' });
+      clearMap();
+    };
+
+    viewHistoryBtn.onclick = async () => {
+      // Stop any active tracking first to avoid confusion
+      if (watchId) {
+        stopBtn.onclick();
+      }
+      
+      const userId = getUserId();
+      if (!userId) { alert('Please select a contact to view history.'); return; }
+      setStatus(`Fetching history for ${userId}...`);
+      try {
+        const res = await fetch(`/history/${encodeURIComponent(userId)}`);
+        const history = await res.json();
+        drawHistoryPath(history);
+      } catch (err) {
+        console.error('Failed to fetch history:', err);
+        setStatus('Error fetching history.');
+      }
+    };
+
+    function drawHistoryPath(history) {
+      clearMap();
+      if (!history || history.length === 0) {
+        setStatus(`No history found for this ID.`);
+        return;
+      }
+
+      const latlngs = history.map(p => [p.lat, p.lng]);
+      // Use a different color for the historical path
+      polyline = L.polyline(latlngs, { color: 'purple' }).addTo(map);
+      map.fitBounds(polyline.getBounds());
+
+      const lastPoint = history[history.length - 1];
+      marker = L.marker([lastPoint.lat, lastPoint.lng]).addTo(map);
+      
+      setStatus(`Displaying history. Last point from: ${new Date(lastPoint.ts).toLocaleString()}`);
+    }
+
+    clearBtn.onclick = async () => {
+      const userId = getUserId();
+      if (!userId) { alert('Please select a contact to clear history.'); return; }
+      try {
+        await fetch(`/history/${encodeURIComponent(userId)}`, { method: 'DELETE' });
+        clearMap();
+        setStatus('History cleared');
+      } catch (err) {
+        console.error('Failed to clear history:', err);
+        setStatus('Error clearing history.');
+      }
+    };
+
+    // Listen for auto-refresh event from server
+    socket.on('contacts_updated', loadContacts);
+    socket.on('history_cleared', () => {
+      console.log('server broadcast: history cleared for a user');
+      if (getUserId()) {
+        clearMap();
+        setStatus('History for the current contact was cleared.');
+      }
+    });
+
+    // Initial load
+    loadContacts();
+  </script>
+</body>
+</html>
