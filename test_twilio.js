@@ -1,27 +1,18 @@
-import twilio from 'twilio';
-import dotenv from 'dotenv';
-
+import twilio from "twilio";
+import dotenv from "dotenv";
 dotenv.config();
 
-// Load credentials from .env
-const accountSid = process.env.TWILIO_ACCOUNT_SID;
-const authToken = process.env.TWILIO_AUTH_TOKEN;
-const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER;
+const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
-const client = twilio(accountSid, authToken);
-
-async function sendTestSMS() {
+(async () => {
   try {
-    const message = await client.messages.create({
-      body: "🚨 Test message from your safety app backend.",
-      from: twilioPhoneNumber,   // must be your Twilio number
-      to: "+91XXXXXXXXXX"        // put your own phone number here (with country code)
+    const msg = await client.messages.create({
+      body: "Hello from Twilio test 🚀",
+      from: process.env.TWILIO_PHONE_NUMBER,
+      to: "+91XXXXXXXXXX"   // must be your verified number
     });
-
-    console.log("✅ Message sent successfully. SID:", message.sid);
+    console.log("✅ Message sent:", msg.sid);
   } catch (err) {
-    console.error("❌ Failed to send SMS:", err);
+    console.error("❌ Error details:", err);
   }
-}
-
-sendTestSMS();
+})();

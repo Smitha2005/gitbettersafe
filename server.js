@@ -11,6 +11,10 @@ import fetch from 'node-fetch'; // For ngrok URL auto-detect
 
 dotenv.config();
 
+console.log("TWILIO_ACCOUNT_SID =", process.env.TWILIO_ACCOUNT_SID);
+console.log("TWILIO_AUTH_TOKEN =", process.env.TWILIO_AUTH_TOKEN);
+console.log("TWILIO_PHONE_NUMBER =", process.env.TWILIO_PHONE_NUMBER);
+
 console.log("SID:", process.env.TWILIO_ACCOUNT_SID ? "Loaded" : "Missing");
 console.log("TOKEN:", process.env.TWILIO_AUTH_TOKEN ? "Loaded" : "Missing");
 console.log("PHONE:", process.env.TWILIO_PHONE_NUMBER ? "Loaded" : "Missing");
@@ -60,11 +64,16 @@ app.use(express.json());
 
 // --- Contacts API ---
 app.get('/contacts', async (req, res) => {
-    const db = await dbPromise;
-    const list = await db.all('SELECT * FROM contacts ORDER BY name');
-    const contacts = {};
-    list.forEach(c => contacts[c.userId] = { name: c.name, phone: c.phone });
-    res.json(contacts);
+    try {
+        const db = await dbPromise;
+        const list = await db.all('SELECT * FROM contacts ORDER BY name');
+        const contacts = {};
+        list.forEach(c => contacts[c.userId] = { name: c.name, phone: c.phone });
+        res.json(contacts);
+    } catch (error) {
+        console.error('Error fetching contacts:', error);
+        res.status(500).send('Internal server error');
+    }
 });
 
 app.post('/contacts', async (req, res) => {
