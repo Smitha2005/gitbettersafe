@@ -37,6 +37,7 @@ const client = twilio(accountSid, authToken);
 // Database setup
 const dbPromise = open({ filename: join(__dirname, 'bettersafe.db'), driver: sqlite3.Database });
 
+
 async function setupDb() {
     const db = await dbPromise;
     await db.exec('PRAGMA foreign_keys = ON;');
@@ -188,6 +189,11 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', () => console.log('User disconnected:', socket.id));
 });
+
+// --- Lightweight SOS HTTP endpoint (for phone shortcuts) ---
+// Usage (GET):  /sos?userId=...&token=...
+// Usage (POST): { userId, token }
+// (Removed /sos HTTP endpoint per request)
 
 // --- Start server ---
 setupDb().then(() => {

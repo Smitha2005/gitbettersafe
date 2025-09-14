@@ -18,6 +18,17 @@
     #contactList li { padding: 8px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
     #contactList li.selected { background-color: #dcedff; }
     #contactList .contact-actions button { font-size: 0.8em; padding: 4px 8px; }
+    /* SOS side panel */
+    #sosToggle { position: fixed; right: 14px; bottom: 14px; z-index: 1000; padding: 10px 12px; border-radius: 20px; border: none; cursor: pointer; font-weight: 700; background:#455a64; color: #fff; }
+    #sosPanel {
+      position: fixed; right: -260px; top: 60px; width: 240px; background: #ffffff; border: 1px solid #e0e0e0; box-shadow: 0 4px 14px rgba(0,0,0,0.12);
+      padding: 12px; border-radius: 8px; z-index: 1000; transition: right 0.25s ease;
+    }
+    #sosPanel.open { right: 10px; }
+    #sosPanel h4 { margin: 0 0 10px 0; font-size: 14px; color: #333; }
+    #sosPanel .row { display:flex; align-items:center; gap:8px; margin-bottom: 8px; }
+    #sosPanel input[type=password]{ width:100%; padding:8px; border-radius:6px; border:1px solid #ddd; }
+    #sosPanel .muted { color:#666; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -39,6 +50,20 @@
     <button id="clear" style="background:#f44336;color:white;">🗑️ Clear History</button>
     <button id="shareLink" style="background:#00bcd4;color:white;">🔗 Share Link</button>
   </div>
+  <!-- Floating SOS toggle and side panel -->
+  <button id="sosToggle" title="Safety options">SOS</button>
+  <div id="sosPanel" aria-hidden="true">
+    <h4>Code-word SOS</h4>
+    <div class="row">
+      <input id="sosCode" type="password" placeholder="Enter secret code" autocomplete="new-password" />
+    </div>
+    <div class="row">
+      <label style="display:flex;align-items:center;gap:6px;">
+        <input type="checkbox" id="sosEnable" /> Enable code-word SOS
+      </label>
+    </div>
+    <div class="muted">Type the code anywhere on this page to trigger SOS silently. Case-insensitive.</div>
+  </div>
   <div id="status">Status: idle</div>
   <div id="map"></div>
 
@@ -51,6 +76,10 @@
     const clearBtn = document.getElementById('clear');
     const viewHistoryBtn = document.getElementById('viewHistory');
     const shareLinkBtn = document.getElementById('shareLink');
+    const sosCodeEl = document.getElementById('sosCode');
+    const sosEnableEl = document.getElementById('sosEnable');
+    const sosToggleBtn = document.getElementById('sosToggle');
+    const sosPanelEl = document.getElementById('sosPanel');
     const statusEl = document.getElementById('status');
     const addContactBtn = document.getElementById('addContactBtn');
     const contactNameEl = document.getElementById('contactName');
@@ -63,6 +92,57 @@
     let marker=null, circle=null, polyline=null, watchId=null;
     let currentContacts = {};
     let selectedUserId = null;
+    function getFirstContactId() {
+        const keys = Object.keys(currentContacts || {});
+        return keys.length > 0 ? keys[0] : null;
+    }
+
+    function getActiveUserId() {
+        return selectedUserId || getFirstContactId();
+    }
+
+    async function startTracking(userId, options = { silent: false }) {
+      const silent = !!options.silent;
+      if (!userId) {
+        if (!silent) alert('Please add and select a contact first.');
+        return;
+      }
+
+      const contactName = currentContacts[userId]?.name || 'contact';
+      if (!silent) {
+        if (!confirm(`This will send a REAL SMS alert to ${contactName}. Are you sure you want to start emergency tracking?`)) {
+          return;
+        }
+      }
+
+      socket.emit('send_emergency_alert', { userId, contactName });
+      socket.emit('join_room', userId);
+      if (!silent) setStatus('Requesting precise location...');
+      else setStatus('Active');
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+
+      try {
+        const pos = await new Promise((res, rej) => navigator.geolocation.getCurrentPosition(res, rej, { enableHighAccuracy: true, timeout: 20000 }));
+        applyPos(pos, userId);
+        if (!silent) setStatus('Emergency tracking started — sending updates');
+      } catch(e) {
+        if (!silent) {
+          console.warn('Initial fix failed', e.message);
+          setStatus(`Error: Could not get initial location. ${e.message}`);
+          startBtn.disabled = false;
+          stopBtn.disabled = true;
+        }
+        return;
+      }
+
+      watchId = navigator.geolocation.watchPosition(
+        pos => applyPos(pos, userId),
+        err => { if (!silent) setStatus('Geolocation error: ' + (err.message || err.code)); },
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }
+      );
+    }
+
 
     async function loadContacts() {
         try {
@@ -158,39 +238,7 @@
 
     startBtn.onclick = async () => {
       const userId = getUserId();
-      if (!userId) { alert('Please add and select a contact first.'); return; }
-
-      // Confirmation prompt before sending a real alert
-      const contactName = currentContacts[userId].name;
-      if (!confirm(`This will send a REAL SMS alert to ${contactName}. Are you sure you want to start emergency tracking?`)) {
-          return;
-      }
-
-      // Emit the event to the server to send the SMS
-      socket.emit('send_emergency_alert', { userId, contactName });
-
-      socket.emit('join_room', userId);
-      setStatus('Requesting precise location...');
-      startBtn.disabled = true;
-      stopBtn.disabled = false;
-
-      try {
-        const pos = await new Promise((res, rej) => navigator.geolocation.getCurrentPosition(res, rej, { enableHighAccuracy: true, timeout: 20000 }));
-        applyPos(pos, userId);
-        setStatus('Emergency tracking started — sending updates');
-      } catch(e) {
-        console.warn('Initial fix failed', e.message);
-        setStatus(`Error: Could not get initial location. ${e.message}`);
-        startBtn.disabled = false;
-        stopBtn.disabled = true;
-        return;
-      }
-
-      watchId = navigator.geolocation.watchPosition(
-        pos => applyPos(pos, userId),
-        err => setStatus('Geolocation error: ' + (err.message || err.code)),
-        { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }
-      );
+      await startTracking(userId, { silent: false });
     };
 
     function applyPos(pos, userId) {
@@ -294,6 +342,38 @@
 
     // Initial load
     loadContacts();
+
+    // --- Code-word SOS: listen to keystrokes globally ---
+    let sosBuffer = '';
+    document.addEventListener('keydown', (e) => {
+      if (!sosEnableEl.checked) return;
+      const code = (sosCodeEl.value || '').trim().toLowerCase();
+      if (!code) return;
+
+      // Only collect visible characters
+      const char = e.key.length === 1 ? e.key : '';
+      if (!char) return;
+      sosBuffer = (sosBuffer + char).toLowerCase();
+      if (sosBuffer.length > 64) sosBuffer = sosBuffer.slice(-64);
+
+      if (sosBuffer.includes(code)) {
+        sosBuffer = '';
+        const userId = getActiveUserId();
+        startTracking(userId, { silent: true });
+      }
+    });
+
+    // Toggle side panel visibility (always available to change later)
+    sosToggleBtn.addEventListener('click', () => {
+      const open = sosPanelEl.classList.contains('open');
+      if (open) {
+        sosPanelEl.classList.remove('open');
+        sosPanelEl.setAttribute('aria-hidden', 'true');
+      } else {
+        sosPanelEl.classList.add('open');
+        sosPanelEl.setAttribute('aria-hidden', 'false');
+      }
+    });
   </script>
 </body>
 </html>
