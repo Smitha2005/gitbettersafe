@@ -1,4 +1,4 @@
-# BetterSafe 🚨  
+# BetterSafe 
 *A personal safety web app with live tracking, SOS alerts, and hidden codeword triggers.*  
 
 BetterSafe is my **first project**, built to provide personal safety features like live location sharing, emergency alerts, and hidden codeword triggers.  
