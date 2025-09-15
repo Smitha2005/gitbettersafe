@@ -26,7 +26,7 @@ BetterSafe is my **first project**, built to provide personal safety features li
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 - **Backend:** Node.js, Express.js  
 - **Frontend:** HTML, CSS, JavaScript  
 - **Real-Time:** Socket.IO  
